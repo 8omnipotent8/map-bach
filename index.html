@@ -58,6 +58,31 @@ body{font-family:Arial,sans-serif}
   .info{max-width:250px;font-size:12px}
   .points-panel{right:60px;top:70px;max-height:52vh}
 }
+
+.point-modal-backdrop{
+  position:fixed; inset:0; z-index:3000; display:none;
+  align-items:center; justify-content:center;
+  background:rgba(0,0,0,.35); padding:18px;
+}
+.point-modal-backdrop.open{display:flex}
+.point-modal{
+  width:min(380px,100%); background:#fff; border-radius:12px;
+  box-shadow:0 8px 30px rgba(0,0,0,.35); padding:16px;
+}
+.point-modal h3{margin:0 0 10px;font-size:18px}
+.point-modal input{
+  width:100%; box-sizing:border-box; font-size:16px; padding:10px 11px;
+  border:1px solid #bbb; border-radius:8px; outline:none;
+}
+.point-modal-coords{font-size:12px;color:#666;margin:7px 0 12px}
+.point-modal-error{font-size:12px;color:#b00020;min-height:16px;margin:6px 0}
+.point-modal-actions{display:flex;gap:8px;justify-content:flex-end}
+.point-modal-actions button{
+  border:0;border-radius:8px;padding:9px 12px;cursor:pointer;font-size:14px
+}
+.point-modal-save{background:#1769e0;color:white}
+.point-modal-cancel{background:#eee}
+
 </style>
 </head>
 <body>
@@ -76,6 +101,21 @@ body{font-family:Arial,sans-serif}
   Бахчисарайское 2 и Бахчисарайское 3<br>
   <span class="badge">WGS‑84</span>
   <div id="gpsText" style="margin-top:6px">Нажмите ◎, чтобы включить GPS.</div>
+</div>
+
+
+<div id="pointModalBackdrop" class="point-modal-backdrop">
+  <div class="point-modal">
+    <h3>Новая точка</h3>
+    <input id="pointNameInput" type="text" maxlength="120"
+           placeholder="Например: Точка 1" autocomplete="off">
+    <div id="pointModalCoords" class="point-modal-coords"></div>
+    <div id="pointModalError" class="point-modal-error"></div>
+    <div class="point-modal-actions">
+      <button id="pointModalCancel" class="point-modal-cancel" type="button">Отмена</button>
+      <button id="pointModalSave" class="point-modal-save" type="button">Сохранить</button>
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -305,12 +345,98 @@ window.deleteCloudPoint = async function(id) {
   setPointsStatus(`Сохранено точек: ${cloudPoints.length}`);
 };
 
+
+const pointModalBackdrop = document.getElementById('pointModalBackdrop');
+const pointNameInput = document.getElementById('pointNameInput');
+const pointModalCoords = document.getElementById('pointModalCoords');
+const pointModalError = document.getElementById('pointModalError');
+const pointModalSave = document.getElementById('pointModalSave');
+const pointModalCancel = document.getElementById('pointModalCancel');
+
+let pendingPoint = null;
+let pendingMarker = null;
+
+function closePointModal() {
+  pointModalBackdrop.classList.remove('open');
+  pointModalError.textContent = '';
+  pendingPoint = null;
+  if (pendingMarker) {
+    map.removeLayer(pendingMarker);
+    pendingMarker = null;
+  }
+}
+
+function openPointModal(latlng) {
+  if (!addPointMode) return;
+
+  addPointMode = false;
+  addPointBtn.classList.remove('active');
+  pendingPoint = latlng;
+
+  if (pendingMarker) map.removeLayer(pendingMarker);
+  pendingMarker = L.circleMarker(latlng, {
+    radius:8, color:'#ff7a00', weight:3, fillColor:'#fff', fillOpacity:1
+  }).addTo(map);
+
+  pointNameInput.value = '';
+  pointModalCoords.textContent =
+    latlng.lat.toFixed(6) + ', ' + latlng.lng.toFixed(6);
+  pointModalError.textContent = '';
+  pointModalBackdrop.classList.add('open');
+
+  setTimeout(() => pointNameInput.focus(), 50);
+}
+
+async function confirmPointSave() {
+  if (!pendingPoint) return;
+  const name = pointNameInput.value.trim();
+  if (!name) {
+    pointModalError.textContent = 'Введите название точки.';
+    pointNameInput.focus();
+    return;
+  }
+
+  pointModalSave.disabled = true;
+  pointModalSave.textContent = 'Сохраняю…';
+  pointModalError.textContent = '';
+
+  const lat = pendingPoint.lat;
+  const lon = pendingPoint.lng;
+
+  const { data, error } = await db
+    .from('map_points')
+    .insert({name, latitude:lat, longitude:lon})
+    .select('id,name,latitude,longitude,created_at')
+    .single();
+
+  pointModalSave.disabled = false;
+  pointModalSave.textContent = 'Сохранить';
+
+  if (error) {
+    console.error(error);
+    pointModalError.textContent = 'Supabase: ' + error.message;
+    setPointsStatus('Ошибка сохранения: ' + error.message);
+    return;
+  }
+
+  cloudPoints.push(data);
+  drawCloudPoints();
+  setPointsStatus(`Сохранено точек: ${cloudPoints.length}`);
+
+  const savedId = Number(data.id);
+  closePointModal();
+
+  const marker = cloudMarkers.get(savedId);
+  if (marker) marker.openPopup();
+}
+
 addPointBtn.addEventListener('click', () => {
   addPointMode = !addPointMode;
   addPointBtn.classList.toggle('active', addPointMode);
   addPointBtn.title = addPointMode ? 'Отменить добавление точки' : 'Добавить свою точку';
+
   if (addPointMode) {
-    setPointsStatus('Режим добавления: нажмите нужное место на карте.');
+    setPointsStatus('Нажмите нужное место на карте.');
     pointsPanel.classList.add('open');
   } else {
     setPointsStatus(`Сохранено точек: ${cloudPoints.length}`);
@@ -321,30 +447,26 @@ pointsToggleBtn.addEventListener('click', () => {
   pointsPanel.classList.toggle('open');
 });
 
-map.on('click', async (e) => {
-  if (!addPointMode) return;
+// Основной клик по карте
+map.on('click', (e) => openPointModal(e.latlng));
 
-  addPointMode = false;
-  addPointBtn.classList.remove('active');
+// Если клик попал именно в полигон/точку Leaflet, тоже обрабатываем его.
+territoryLayer.eachLayer(layer => layer.on('click', (e) => openPointModal(e.latlng)));
+specialPoints.eachLayer(layer => layer.on('click', (e) => openPointModal(e.latlng)));
 
-  const nameRaw = prompt('Название точки:');
-  if (nameRaw === null) {
-    setPointsStatus(`Сохранено точек: ${cloudPoints.length}`);
-    return;
-  }
-
-  const name = nameRaw.trim();
-  if (!name) {
-    alert('Название не может быть пустым.');
-    setPointsStatus(`Сохранено точек: ${cloudPoints.length}`);
-    return;
-  }
-
-  await saveCloudPoint(e.latlng.lat, e.latlng.lng, name);
+pointModalSave.addEventListener('click', confirmPointSave);
+pointModalCancel.addEventListener('click', closePointModal);
+pointModalBackdrop.addEventListener('click', (e) => {
+  if (e.target === pointModalBackdrop) closePointModal();
+});
+pointNameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') confirmPointSave();
+  if (e.key === 'Escape') closePointModal();
 });
 
 // Загружаем сохранённые точки при каждом открытии карты.
 loadCloudPoints();
+
 
 let gpsMarker = null;
 let accuracyCircle = null;
